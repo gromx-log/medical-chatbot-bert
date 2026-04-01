@@ -1,0 +1,14 @@
+
+# Sensitive
+kaggle.json
+
+# Large model files (loaded from HF instead)
+bert-medical-chatbot-final/
+bert-medical-chatbot/
+
+# Data files
+*.csv
+
+# Colab system folders
+.config/
+sample_data/

@@ -2,7 +2,6 @@ import streamlit as st
 import torch
 import pickle
 import re
-import numpy as np
 from transformers import BertTokenizer, BertForSequenceClassification
 from huggingface_hub import hf_hub_download
 
@@ -39,8 +38,7 @@ def predict_answer(question, top_k=3):
         return None, 0.0, []
     inputs = tokenizer(cleaned, return_tensors="pt", truncation=True, padding="max_length", max_length=128).to(device)
     with torch.no_grad():
-        outputs = model(**inputs)
-        probs = torch.softmax(outputs.logits, dim=-1)[0]
+        probs = torch.softmax(model(**inputs).logits, dim=-1)[0]
     top_k_probs, top_k_ids = torch.topk(probs, k=min(top_k, len(probs)))
     top_k_probs = top_k_probs.cpu().numpy()
     top_k_ids = top_k_ids.cpu().numpy()
@@ -49,19 +47,29 @@ def predict_answer(question, top_k=3):
     alt_answers = []
     for i in range(1, len(top_k_ids)):
         alt = le.inverse_transform([top_k_ids[i]])[0]
-        alt_conf = float(top_k_probs[i])
         if alt[:50] != best_answer[:50]:
-            alt_answers.append((alt, alt_conf))
+            alt_answers.append((alt, float(top_k_probs[i])))
     return best_answer, best_conf, alt_answers
 
 st.title("🏥 Medical Chatbot")
 st.markdown("*Powered by BERT — Fine-tuned on Medical Q&A Dataset*")
 st.divider()
-st.markdown("> ⚠️ **Disclaimer:** This chatbot is for **educational purposes only**. Always consult a qualified medical professional.")
+st.info("⚠️ This chatbot is for **educational purposes only**. Always consult a qualified medical professional.")
+
+# Sidebar with model info
+with st.sidebar:
+    st.header("ℹ️ Model Info")
+    st.markdown("**Model:** bert-base-uncased")
+    st.markdown("**Task:** Medical Q&A Classification")
+    st.markdown("**Classes:** 20")
+    st.markdown("**Val Accuracy:** 68.32%")
+    st.markdown("**Dataset:** Comprehensive Medical Q&A")
+    st.divider()
+    st.caption("Note: This model is trained on NIH genetic disease data. It performs best on questions about inherited conditions.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
-    st.session_state.messages.append({"role": "assistant", "content": "👋 Hello! I am a medical chatbot powered by BERT. Ask me a medical question!"})
+    st.session_state.messages.append({"role": "assistant", "content": "👋 Hello! I am a medical chatbot powered by BERT, trained on NIH genetic disease data. I work best with questions about inherited conditions and genetic diseases!"})
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -74,18 +82,16 @@ if prompt := st.chat_input("Ask a medical question..."):
     with st.chat_message("assistant"):
         with st.spinner("🔍 Analyzing your question..."):
             answer, confidence, alternatives = predict_answer(prompt)
-        if answer is None or confidence < 0.25:
-            response = "I am not confident enough to answer that accurately. Try rephrasing or ask about a specific symptom or disease."
+        if answer is None:
+            response = "Please type a valid medical question."
         else:
-            lines_resp = ["**Answer:**", "", answer, "", "---"]
-            lines_resp.append("🎯 *Confidence: " + f"{confidence:.2%}" + " | Model: bert-base-uncased*")
+            resp_lines = ["**Answer:**", "", answer, "", "---",
+                "🎯 *Confidence: " + f"{confidence:.2%}" + " | Model: bert-base-uncased*"]
             if alternatives:
-                lines_resp.append("")
-                lines_resp.append("**📋 Other possible answers:**")
+                resp_lines += ["", "**📋 Related answers:**"]
                 for i, (alt, alt_conf) in enumerate(alternatives[:2], 1):
                     short = alt[:180] + "..." if len(alt) > 180 else alt
-                    lines_resp.append("")
-                    lines_resp.append("*Option " + str(i) + " (" + f"{alt_conf:.1%}" + "):* " + short)
-            response = "\n".join(lines_resp)
+                    resp_lines.append("*Option " + str(i) + " (" + f"{alt_conf:.1%}" + "):* " + short)
+            response = "\n".join(resp_lines)
         st.markdown(response)
         st.session_state.messages.append({"role": "assistant", "content": response})

@@ -3,26 +3,24 @@ import streamlit as st
 import torch
 import pickle
 import re
+import numpy as np
 from transformers import BertTokenizer, BertForSequenceClassification
 from huggingface_hub import hf_hub_download
 
-# ─── Page Config ───────────────────────────────────────────────
 st.set_page_config(
     page_title="🏥 Medical Chatbot",
     page_icon="🏥",
     layout="centered"
 )
 
-# ─── Load Model from HF Model Hub ──────────────────────────────
 @st.cache_resource
 def load_model():
-    MODEL_REPO = "Gromminite/medical-chatbot-bert-model"  # ← Model repo
+    MODEL_REPO = "Gromminite/medical-chatbot-bert-model"
     
     tokenizer = BertTokenizer.from_pretrained(MODEL_REPO)
     model     = BertForSequenceClassification.from_pretrained(MODEL_REPO)
     model.eval()
     
-    # Download label encoder
     le_path = hf_hub_download(
         repo_id=MODEL_REPO,
         filename="label_encoder.pkl",
@@ -31,15 +29,13 @@ def load_model():
     with open(le_path, "rb") as f:
         le = pickle.load(f)
     
-    device = torch.device("cpu")  # Streamlit Cloud has no GPU
+    device = torch.device("cpu")
     model  = model.to(device)
-    
     return model, tokenizer, le, device
 
 with st.spinner("⏳ Loading BERT model... please wait"):
     model, tokenizer, le, device = load_model()
 
-# ─── Text Cleaning ──────────────────────────────────────────────
 def clean_text(text):
     if not isinstance(text, str):
         return ""
@@ -52,10 +48,14 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
-# ─── Prediction ─────────────────────────────────────────────────
-def predict_answer(question):
+# ─── Improved Prediction with Top-K + Confidence Threshold ──────
+def predict_answer(question, top_k=3, confidence_threshold=0.25):
     cleaned = clean_text(question)
-    inputs  = tokenizer(
+    
+    if len(cleaned.strip()) < 3:
+        return None, 0.0, []
+    
+    inputs = tokenizer(
         cleaned,
         return_tensors="pt",
         truncation=True,
@@ -66,11 +66,26 @@ def predict_answer(question):
     with torch.no_grad():
         outputs    = model(**inputs)
         logits     = outputs.logits
-        pred_id    = torch.argmax(logits, dim=-1).item()
-        confidence = torch.softmax(logits, dim=-1).max().item()
+        probs      = torch.softmax(logits, dim=-1)[0]
     
-    answer = le.inverse_transform([pred_id])[0]
-    return answer, confidence
+    # Get top-K predictions
+    top_k_probs, top_k_ids = torch.topk(probs, k=min(top_k, len(probs)))
+    top_k_probs = top_k_probs.cpu().numpy()
+    top_k_ids   = top_k_ids.cpu().numpy()
+    
+    best_conf   = float(top_k_probs[0])
+    best_answer = le.inverse_transform([top_k_ids[0]])[0]
+    
+    # Get all top-k answers
+    alt_answers = []
+    for i in range(1, len(top_k_ids)):
+        alt_answer = le.inverse_transform([top_k_ids[i]])[0]
+        alt_conf   = float(top_k_probs[i])
+        # Only show alternatives that are meaningfully different
+        if alt_answer[:50] != best_answer[:50]:
+            alt_answers.append((alt_answer, alt_conf))
+    
+    return best_answer, best_conf, alt_answers
 
 # ─── UI ─────────────────────────────────────────────────────────
 st.title("🏥 Medical Chatbot")
@@ -78,11 +93,10 @@ st.markdown("*Powered by BERT — Fine-tuned on Medical Q&A Dataset*")
 st.divider()
 
 st.markdown("""
-> ⚠️ **Disclaimer:** This chatbot is for educational purposes only.
+> ⚠️ **Disclaimer:** This chatbot is for **educational purposes only**.
 > Always consult a qualified medical professional for health advice.
 """)
 
-# ─── Chat History ───────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.messages.append({
@@ -94,7 +108,6 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ─── Chat Input ─────────────────────────────────────────────────
 if prompt := st.chat_input("Ask a medical question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -102,14 +115,37 @@ if prompt := st.chat_input("Ask a medical question..."):
     
     with st.chat_message("assistant"):
         with st.spinner("🔍 Analyzing your question..."):
-            answer, confidence = predict_answer(prompt)
+            answer, confidence, alternatives = predict_answer(prompt)
         
-        response = f"""
+        # ── Low confidence → honest fallback message ──
+        if answer is None or confidence < 0.25:
+            response = """
+I'm not confident enough to answer that question accurately.
+
+💡 Try rephrasing your question, or ask about specific symptoms, 
+diseases, or medical conditions.
+
+⚠️ *Always consult a qualified medical professional for health advice.*
+"""
+        else:
+            response = f"**Answer:**
+
 {answer}
 
 ---
-🎯 *Confidence: {confidence:.2%} | Model: bert-base-uncased*
-"""
+🎯 *Confidence: {confidence:.2%} | Model: bert-base-uncased*"
+            
+            # ── Show alternative answers if available ──
+            if alternatives:
+                response += "
+
+**📋 Other possible answers:**"
+                for i, (alt, alt_conf) in enumerate(alternatives[:2], 1):
+                    short = alt[:180] + "..." if len(alt) > 180 else alt
+                    response += f"
+
+*Option {i} ({alt_conf:.1%}):* {short}"
+        
         st.markdown(response)
         st.session_state.messages.append({
             "role": "assistant",
